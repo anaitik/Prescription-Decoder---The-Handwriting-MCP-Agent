@@ -10,5 +10,6 @@
   "prescription_view_url": "https://example.com/prescriptions",
   "twilio_account_sid_env": "TWILIO_ACCOUNT_SID",
   "twilio_auth_token_env": "TWILIO_AUTH_TOKEN",
-  "twilio_from_number": ""
+  "twilio_from_number": "",
+  "use_mock_fhir": true
 }

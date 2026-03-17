@@ -1,6 +1,7 @@
 import base64
 import binascii
 import json
+import logging
 import os
 import re
 import sys
@@ -36,6 +37,7 @@ TRANSLATION_PROMPT = (
 FHIR_ID_PATTERN = re.compile(r"^[A-Za-z0-9\-\.]{1,64}$")
 
 mcp = FastMCP("Prescription Decoder", json_response=True)
+LOGGER = logging.getLogger("prescription_mcp")
 
 
 def _normalize_base64(image_data: str) -> str:
@@ -338,14 +340,78 @@ def _fetch_patient_profile(
     fhir_token: str,
     fhir_server_url: Optional[str],
 ) -> Dict[str, Any]:
-    _ = _fhir_auth_headers(fhir_token)
-    # Mock implementation for development. In production, call:
-    # GET {fhir_server_url}/Patient/{patient_id} and related Preference/Communication.
+    config = _load_config()
+    use_mock = bool(config.get("use_mock_fhir", True))
+    if use_mock or not fhir_server_url:
+        # Mock implementation for development.
+        return {
+            "patient_id": patient_id,
+            "phone_number": "+919000000000",
+            "preferred_language": "hi",
+            "display_name": "Patient",
+        }
+
+    try:
+        import requests
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("requests is required for real FHIR calls. Install: pip install requests") from exc
+
+    url = f"{fhir_server_url.rstrip('/')}/Patient/{patient_id}"
+    headers = _fhir_auth_headers(fhir_token)
+    headers["Accept"] = "application/fhir+json"
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        patient = response.json()
+    except Exception as exc:
+        # Avoid logging PHI in errors; keep message generic.
+        LOGGER.warning("FHIR patient profile fetch failed.")
+        raise RuntimeError("Failed to fetch patient profile from FHIR server.") from exc
+
+    phone_number = None
+    telecom = patient.get("telecom") or []
+    for entry in telecom:
+        if entry.get("system") == "phone" and entry.get("use") == "mobile":
+            phone_number = entry.get("value")
+            break
+    if not phone_number:
+        for entry in telecom:
+            if entry.get("system") == "phone":
+                phone_number = entry.get("value")
+                break
+
+    preferred_language = None
+    communications = patient.get("communication") or []
+    preferred_entry = next(
+        (entry for entry in communications if entry.get("preferred") is True),
+        None,
+    )
+    language_entry = preferred_entry or (communications[0] if communications else None)
+    if language_entry:
+        language_cc = language_entry.get("language") or {}
+        coding = language_cc.get("coding") or []
+        if coding:
+            preferred_language = coding[0].get("code") or coding[0].get("display")
+        if not preferred_language:
+            preferred_language = language_cc.get("text")
+
+    name = patient.get("name") or []
+    display_name = "Patient"
+    if name:
+        name_obj = name[0]
+        if name_obj.get("text"):
+            display_name = name_obj["text"]
+        else:
+            given = " ".join(name_obj.get("given") or [])
+            family = name_obj.get("family") or ""
+            display_name = " ".join(part for part in [given, family] if part) or display_name
+
     return {
         "patient_id": patient_id,
-        "phone_number": "+919000000000",
-        "preferred_language": "hi",
-        "display_name": "Patient",
+        "phone_number": phone_number,
+        "preferred_language": preferred_language,
+        "display_name": display_name,
     }
 
 
@@ -506,6 +572,7 @@ def _load_config() -> Dict[str, Any]:
         "twilio_account_sid_env": "TWILIO_ACCOUNT_SID",
         "twilio_auth_token_env": "TWILIO_AUTH_TOKEN",
         "twilio_from_number": "",
+        "use_mock_fhir": True,
     }
     if os.path.isfile(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as handle:

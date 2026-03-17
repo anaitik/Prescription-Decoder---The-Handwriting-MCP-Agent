@@ -1,3 +1,4 @@
+import logging
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ STATE_SUBMITTED = "TASK_STATE_SUBMITTED"
 STATE_WORKING = "TASK_STATE_WORKING"
 STATE_COMPLETED = "TASK_STATE_COMPLETED"
 STATE_FAILED = "TASK_STATE_FAILED"
+
+LOGGER = logging.getLogger("prescription_agent")
 
 
 def _utc_now() -> str:
@@ -289,11 +292,17 @@ class PrescriptionCompleterAgent:
         )
 
         config = _load_config()
-        profile = _fetch_patient_profile(
-            patient_id=patient_id,
-            fhir_token=fhir_access_token,
-            fhir_server_url=fhir_server_url,
-        )
+        try:
+            profile = _fetch_patient_profile(
+                patient_id=patient_id,
+                fhir_token=fhir_access_token,
+                fhir_server_url=fhir_server_url,
+            )
+        except Exception:
+            # Avoid failing the full workflow if patient preferences are unavailable.
+            LOGGER.warning("Patient profile lookup failed; using defaults.")
+            profile = {}
+
         preferred_language = (
             profile.get("preferred_language")
             or config.get("default_language")

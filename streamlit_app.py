@@ -1,0 +1,124 @@
+import base64
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+
+import streamlit as st
+
+from a2a_agent import PrescriptionCompleterAgent
+
+# Basic logging for healthcare demos; use structured logging in production.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+LOGGER = logging.getLogger("streamlit_app")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _audit_event(audit: List[Dict[str, Any]], event: str, details: Dict[str, Any]) -> None:
+    # Minimal audit trail. Replace with a compliant audit sink in production.
+    audit.append({"timestamp": _utc_now(), "event": event, "details": details})
+
+
+def _build_request(
+    image_b64: str,
+    media_type: str,
+    patient_id: str,
+    fhir_access_token: str,
+    fhir_server_url: str,
+) -> Dict[str, Any]:
+    return {
+        "message": {
+            "role": "ROLE_USER",
+            "parts": [{"raw": image_b64, "mediaType": media_type}],
+            "metadata": {
+                "patient_id": patient_id,
+                "fhir_access_token": fhir_access_token,
+                "fhir_server_url": fhir_server_url,
+            },
+        }
+    }
+
+
+def _extract_report(task: Dict[str, Any]) -> Dict[str, Any]:
+    artifacts = task.get("artifacts") or []
+    for artifact in artifacts:
+        for part in artifact.get("parts", []):
+            if part.get("mediaType") == "application/json":
+                return part.get("data") or {}
+    return {}
+
+
+def main() -> None:
+    st.set_page_config(page_title="Prescription Completer", layout="wide")
+    st.title("PrescriptionCompleterAgent Demo")
+    st.markdown(
+        "Upload a prescription image and provide patient context to generate FHIR resources, "
+        "interaction checks, allergy alerts, and patient-friendly messaging."
+    )
+
+    audit_trail: List[Dict[str, Any]] = []
+
+    with st.sidebar:
+        st.header("Patient Context")
+        patient_id = st.text_input("Patient ID", value="patient-123")
+        fhir_access_token = st.text_input("FHIR Access Token", value="demo-token", type="password")
+        fhir_server_url = st.text_input("FHIR Server URL", value="https://fhir.example.com")
+        st.caption("These values are required for SHARP context propagation.")
+
+    uploaded_file = st.file_uploader(
+        "Upload prescription image",
+        type=["png", "jpg", "jpeg", "webp"],
+    )
+
+    if st.button("Run Workflow", type="primary"):
+        if not uploaded_file:
+            st.error("Please upload a prescription image.")
+            return
+        if not patient_id or not fhir_access_token:
+            st.error("Please provide Patient ID and FHIR Access Token.")
+            return
+
+        try:
+            image_bytes = uploaded_file.read()
+            image_b64 = base64.b64encode(image_bytes).decode("ascii")
+            media_type = uploaded_file.type or "image/png"
+
+            _audit_event(audit_trail, "workflow_submitted", {"patient_id": patient_id})
+
+            agent = PrescriptionCompleterAgent()
+            request = _build_request(
+                image_b64=image_b64,
+                media_type=media_type,
+                patient_id=patient_id,
+                fhir_access_token=fhir_access_token,
+                fhir_server_url=fhir_server_url,
+            )
+
+            with st.spinner("Processing prescription..."):
+                response = agent.send_message(request)
+
+            task = response.get("task") or {}
+            report = _extract_report(task)
+            _audit_event(audit_trail, "workflow_completed", {"task_state": task.get("status")})
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("Clinician View")
+                st.json(report or {"message": "No report data returned."})
+            with col2:
+                st.subheader("Patient View")
+                st.write(report.get("patient_message") or "No patient message returned.")
+
+            st.subheader("Audit Trail")
+            st.json(audit_trail)
+        except Exception as exc:
+            LOGGER.exception("Workflow failed")
+            _audit_event(audit_trail, "workflow_failed", {"error": str(exc)})
+            st.error(f"Workflow failed: {exc}")
+
+
+if __name__ == "__main__":
+    main()

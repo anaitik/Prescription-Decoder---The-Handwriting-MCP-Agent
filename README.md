@@ -33,12 +33,18 @@ FHIR MedicationRequest + Safety Report + Patient Summary
 
 Suggested install:
 ```bash
-pip install mcp openai fhir.resources twilio
+pip install mcp openai fhir.resources twilio requests
 ```
 
 Run the demo:
 ```bash
 python demo.py
+```
+
+Run the Streamlit frontend:
+```bash
+pip install streamlit
+streamlit run streamlit_app.py
 ```
 
 ## Environment Variables Needed
@@ -54,6 +60,10 @@ SHARP context headers expected on requests:
 - `X-Patient-ID`
 - `X-FHIR-Access-Token`
 - `X-FHIR-Server-URL` (optional)
+
+FHIR patient preferences:
+- The agent reads patient language and phone from the FHIR `Patient` resource (`communication` and `telecom`).
+- Set `use_mock_fhir` to `false` in `config.json` to enable real FHIR calls.
 
 ## Example API Calls
 

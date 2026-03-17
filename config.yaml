@@ -59,3 +59,7 @@ permissions:
   optional:
     - name: "Prescription Viewing Link"
       reason: "Provide a URL to the full prescription."
+
+config:
+  use_mock_fhir: true
+  notes: "Set to false to read patient language/phone from real FHIR Patient resources."

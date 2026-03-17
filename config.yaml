@@ -1,0 +1,61 @@
+# Marketplace configuration for MCP tools and A2A agent capabilities.
+version: "1.0"
+name: "Prescription Decoder MCP + A2A Agent"
+owner: "Example Healthcare Org"
+
+mcp:
+  tools:
+    - name: "decode_prescription"
+      description: "Decode a base64 image into FHIR MedicationRequest resources."
+      input_schema:
+        image_data: "string (base64 image)"
+        patient_id: "string (FHIR Patient id)"
+    - name: "check_drug_interactions"
+      description: "Check interactions between new meds and current meds."
+      input_schema:
+        medications: "array of MedicationRequest"
+        patient_id: "string (FHIR Patient id)"
+    - name: "check_allergies"
+      description: "Check new meds against AllergyIntolerance and cross-reactivity."
+      input_schema:
+        new_medications: "array (MedicationRequest or string names)"
+        patient_id: "string (FHIR Patient id)"
+    - name: "translate_to_hindi"
+      description: "Translate medical text into Hindi or other Indian languages."
+      input_schema:
+        text: "string"
+        target_language: "string (language code or name)"
+    - name: "send_sms"
+      description: "Send SMS via Twilio."
+      input_schema:
+        phone_number: "string (E.164)"
+        message: "string"
+
+a2a_agent:
+  name: "PrescriptionCompleterAgent"
+  modes:
+    - "synchronous"
+    - "asynchronous"
+    - "streaming"
+  task_states:
+    - "TASK_STATE_SUBMITTED"
+    - "TASK_STATE_WORKING"
+    - "TASK_STATE_COMPLETED"
+    - "TASK_STATE_FAILED"
+  capabilities:
+    - "FHIR MedicationRequest output"
+    - "Drug interaction warnings"
+    - "Allergy alerts with cross-reactivity"
+    - "Patient-friendly summary"
+    - "Translation to preferred language"
+    - "SMS notification"
+
+permissions:
+  required:
+    - name: "FHIR Access"
+      reason: "Fetch patient medications, allergies, and preferences."
+    - name: "SMS Sending"
+      reason: "Send patient summaries and warnings."
+  optional:
+    - name: "Prescription Viewing Link"
+      reason: "Provide a URL to the full prescription."

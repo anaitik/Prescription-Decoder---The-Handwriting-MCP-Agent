@@ -84,6 +84,9 @@ OpenAI quota handling:
 - If you hit a 429 quota error, either add billing/credits or set `use_mock_vision=true`
   in `config.json` to run the end-to-end workflow with mock decoding.
 
+Translation:
+- By default translation is disabled. To enable, set `enable_translation=true` in `config.json`.
+
 ## Example API Calls
 
 MCP tool call (conceptual JSON payload):

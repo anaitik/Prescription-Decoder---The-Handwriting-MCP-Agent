@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import streamlit as st
+import pandas as pd
 
 from a2a_agent import PrescriptionCompleterAgent
 
@@ -120,10 +121,64 @@ def main() -> None:
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("Clinician View")
-                st.json(report or {"message": "No report data returned."})
+                if not report:
+                    st.json({"message": "No report data returned."})
+                else:
+                    st.markdown("**Summary**")
+                    st.write(report.get("summary") or "No summary.")
+
+                    meds = report.get("prescription") or []
+                    med_rows = []
+                    for med in meds:
+                        med_cc = med.get("medicationCodeableConcept") or med.get("medication") or {}
+                        if isinstance(med_cc, dict) and "concept" in med_cc:
+                            med_cc = med_cc.get("concept") or {}
+                        med_name = (
+                            med_cc.get("text")
+                            if isinstance(med_cc, dict)
+                            else "Medication"
+                        )
+                        dosage = ""
+                        dosage_instructions = med.get("dosageInstruction") or []
+                        if dosage_instructions:
+                            dosage = dosage_instructions[0].get("text") or ""
+                        med_rows.append(
+                            {
+                                "Medication": med_name or "Medication",
+                                "Instructions": dosage,
+                                "Status": med.get("status"),
+                                "Intent": med.get("intent"),
+                            }
+                        )
+                    if med_rows:
+                        st.markdown("**Medications**")
+                        st.dataframe(pd.DataFrame(med_rows), use_container_width=True)
+
+                    interactions = report.get("interaction_warnings") or []
+                    if interactions:
+                        st.markdown("**Interaction Warnings**")
+                        st.dataframe(pd.DataFrame(interactions), use_container_width=True)
+                    else:
+                        st.markdown("**Interaction Warnings**")
+                        st.write("None")
+
+                    allergies = report.get("allergy_alerts") or []
+                    if allergies:
+                        st.markdown("**Allergy Alerts**")
+                        st.dataframe(pd.DataFrame(allergies), use_container_width=True)
+                    else:
+                        st.markdown("**Allergy Alerts**")
+                        st.write("None")
+
+                    with st.expander("Raw JSON"):
+                        st.json(report)
             with col2:
                 st.subheader("Patient View")
-                st.write(report.get("patient_message") or "No patient message returned.")
+                st.text_area(
+                    "Patient Message",
+                    value=report.get("patient_message") or "No patient message returned.",
+                    height=300,
+                )
 
             st.subheader("Audit Trail")
             st.json(audit_trail)

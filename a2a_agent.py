@@ -318,13 +318,17 @@ class PrescriptionCompleterAgent:
         translated_text = patient_friendly
         translation_result = None
         sms_result = None
-        try:
-            translation_result = translate_to_hindi(
-                text=patient_friendly, target_language=preferred_language
-            )
-            translated_text = translation_result.get("translated_text") or translated_text
-        except Exception:
-            translation_result = {"language": preferred_language, "translated_text": patient_friendly}
+        if config.get("enable_translation"):
+            try:
+                translation_result = translate_to_hindi(
+                    text=patient_friendly, target_language=preferred_language
+                )
+                translated_text = translation_result.get("translated_text") or translated_text
+            except Exception:
+                translation_result = {
+                    "language": preferred_language,
+                    "translated_text": patient_friendly,
+                }
 
         if phone_number:
             try:
@@ -339,7 +343,7 @@ class PrescriptionCompleterAgent:
             "allergy_alerts": allergy_report.get("warnings") or [],
             "summary": summary,
             "patient_message": translated_text,
-            "language": preferred_language,
+            "language": preferred_language if config.get("enable_translation") else "en",
             "sms_status": sms_result,
         }
 

@@ -644,6 +644,7 @@ def _load_config() -> Dict[str, Any]:
         "temperature": 0.2,
         "image_detail": "auto",
         "default_language": "hi",
+        "enable_translation": False,
         "prescription_view_url": "https://example.com/prescriptions",
         "twilio_account_sid_env": "TWILIO_ACCOUNT_SID",
         "twilio_auth_token_env": "TWILIO_AUTH_TOKEN",

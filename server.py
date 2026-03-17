@@ -154,9 +154,12 @@ def medication_to_rxnorm(med_name: str) -> Optional[Tuple[str, str]]:
     mapping = {
         "paracetamol": ("161", "Paracetamol"),
         "acetaminophen": ("161", "Acetaminophen"),
+        "aspirin": ("1191", "Aspirin"),
         "amoxicillin": ("723", "Amoxicillin"),
         "ibuprofen": ("5640", "Ibuprofen"),
         "azithromycin": ("18631", "Azithromycin"),
+        "warfarin": ("11289", "Warfarin"),
+        "clopidogrel": ("32968", "Clopidogrel"),
         "metformin": ("6809", "Metformin"),
         "omeprazole": ("7646", "Omeprazole"),
         "pantoprazole": ("40790", "Pantoprazole"),
@@ -256,6 +259,115 @@ def _to_medication_request(
         dosageInstruction=[dosage_instruction],
         note=notes or None,
     )
+
+
+def _normalize_med_name(name: str) -> str:
+    if not name:
+        return ""
+    text = name.strip().lower()
+    aliases = {
+        "acetylsalicylic acid": "aspirin",
+        "aspirin": "aspirin",
+        "warfarin": "warfarin",
+        "coumadin": "warfarin",
+        "ibuprofen": "ibuprofen",
+        "naproxen": "naproxen",
+        "clopidogrel": "clopidogrel",
+        "paracetamol": "paracetamol",
+        "acetaminophen": "paracetamol",
+    }
+    for key, value in aliases.items():
+        if key in text:
+            return value
+    return text
+
+
+def _med_name_from_request(med_request: MedicationRequest) -> str:
+    med_cc = getattr(med_request, "medicationCodeableConcept", None)
+    if med_cc:
+        if getattr(med_cc, "text", None):
+            return med_cc.text
+        coding = getattr(med_cc, "coding", None) or []
+        if coding:
+            display = getattr(coding[0], "display", None)
+            if display:
+                return display
+            code = getattr(coding[0], "code", None)
+            if code:
+                return code
+    med_ref = getattr(med_request, "medicationReference", None)
+    if med_ref and getattr(med_ref, "reference", None):
+        return med_ref.reference
+    return ""
+
+
+def _fetch_patient_medications(
+    patient_id: str,
+    fhir_token: str,
+    fhir_server_url: Optional[str],
+) -> List[MedicationRequest]:
+    _ = _fhir_auth_headers(fhir_token)
+    # Mock implementation for development. In production, call:
+    # GET {fhir_server_url}/MedicationRequest?subject=Patient/{patient_id}
+    mock_items = [
+        {
+            "medication_name": "Warfarin",
+            "dosage": "5 mg",
+            "frequency": "once daily",
+            "duration": "",
+            "instructions": "",
+        },
+        {
+            "medication_name": "Aspirin",
+            "dosage": "75 mg",
+            "frequency": "once daily",
+            "duration": "",
+            "instructions": "",
+        },
+    ]
+    return [_to_medication_request(item, patient_id) for item in mock_items]
+
+
+def _find_interactions(
+    new_meds: List[str],
+    existing_meds: List[str],
+) -> List[Dict[str, str]]:
+    interaction_db: Dict[frozenset, Dict[str, str]] = {
+        frozenset(["warfarin", "aspirin"]): {
+            "severity": "high",
+            "description": "Increased risk of bleeding when warfarin is combined with aspirin.",
+            "recommendation": "Avoid combination if possible; monitor INR and bleeding closely.",
+        },
+        frozenset(["warfarin", "ibuprofen"]): {
+            "severity": "medium",
+            "description": "NSAIDs may increase bleeding risk and alter anticoagulant effect.",
+            "recommendation": "Use with caution; consider alternative analgesic.",
+        },
+        frozenset(["clopidogrel", "aspirin"]): {
+            "severity": "medium",
+            "description": "Dual antiplatelet therapy increases bleeding risk.",
+            "recommendation": "Ensure clinical indication and monitor for bleeding.",
+        },
+    }
+
+    interactions: List[Dict[str, str]] = []
+    seen_pairs = set()
+    for new_med in new_meds:
+        for existing_med in existing_meds:
+            pair = frozenset([new_med, existing_med])
+            if pair in interaction_db and pair not in seen_pairs:
+                entry = interaction_db[pair]
+                interactions.append(
+                    {
+                        "medications": ", ".join(sorted(pair)),
+                        "severity": entry["severity"],
+                        "description": entry["description"],
+                        "recommendation": entry["recommendation"],
+                    }
+                )
+                seen_pairs.add(pair)
+
+    return interactions
 
 
 def _load_config() -> Dict[str, Any]:
@@ -366,6 +478,67 @@ def decode_prescription(
         if isinstance(item, dict):
             resources.append(_to_medication_request(item, patient_id_from_ctx).dict())
     return resources
+
+
+@mcp.tool()
+def check_drug_interactions(
+    medications: List[Dict[str, Any]],
+    patient_id: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> Dict[str, Any]:
+    """Check for interactions between new medications and a patient's current meds.
+
+    Expected SHARP context (Streamable HTTP headers):
+    - X-Patient-ID: FHIR Patient id (regex [A-Za-z0-9-\\.]{1,64})
+    - X-FHIR-Access-Token: Bearer token (with or without "Bearer " prefix)
+    - X-FHIR-Server-URL: Optional, used for downstream FHIR calls
+
+    Note: The interaction database is mocked. In production, connect to a real
+    interaction DB such as RxNav or Drugs.com APIs.
+    """
+    if not isinstance(medications, list) or not medications:
+        raise ValueError("medications must be a non-empty list of MedicationRequest objects.")
+
+    patient_id_from_ctx, fhir_token, fhir_server_url = _extract_sharp_context(ctx, patient_id)
+
+    new_requests: List[MedicationRequest] = []
+    for idx, item in enumerate(medications):
+        if not isinstance(item, dict):
+            raise ValueError(f"MedicationRequest at index {idx} must be an object.")
+        try:
+            new_requests.append(MedicationRequest(**item))
+        except Exception as exc:
+            raise ValueError(f"Invalid MedicationRequest at index {idx}: {exc}") from exc
+
+    existing_requests = _fetch_patient_medications(
+        patient_id=patient_id_from_ctx,
+        fhir_token=fhir_token,
+        fhir_server_url=fhir_server_url,
+    )
+
+    new_med_names = [
+        _normalize_med_name(_med_name_from_request(req)) for req in new_requests
+    ]
+    existing_med_names = [
+        _normalize_med_name(_med_name_from_request(req)) for req in existing_requests
+    ]
+
+    new_med_names = [name for name in new_med_names if name]
+    existing_med_names = [name for name in existing_med_names if name]
+
+    interactions = _find_interactions(new_med_names, existing_med_names)
+
+    return {
+        "patient_id": patient_id_from_ctx,
+        "interaction_count": len(interactions),
+        "interactions": interactions,
+        "checked_new_medications": new_med_names,
+        "checked_existing_medications": existing_med_names,
+        "notes": [
+            "Interaction checks use a mocked database for development.",
+            "Replace with a real drug interaction source (e.g., RxNav or Drugs.com) in production.",
+        ],
+    }
 
 
 def _test_decode_prescription() -> None:

@@ -50,6 +50,7 @@ streamlit run streamlit_app.py
 ## Environment Variables Needed
 Required:
 - `OPENAI_API_KEY`
+- `GROQ_API_KEY` (if using Groq)
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 
@@ -64,13 +65,24 @@ SHARP context headers expected on requests:
 `.env` format (loaded automatically on startup):
 ```
 OPENAI_API_KEY=...
+GROQ_API_KEY=...
 TWILIO_ACCOUNT_SID=...
 TWILIO_AUTH_TOKEN=...
 ```
 
+## Using Groq Instead of OpenAI
+Groq supports an OpenAI-compatible API endpoint. To switch:
+1. Set `provider` to `groq` in `config.json`.
+2. Set `GROQ_API_KEY` in `.env`.
+3. Use a Groq vision-capable model in `config.json` (example provided). citeturn0search1turn0search2
+
 FHIR patient preferences:
 - The agent reads patient language and phone from the FHIR `Patient` resource (`communication` and `telecom`).
 - Set `use_mock_fhir` to `false` in `config.json` to enable real FHIR calls.
+
+OpenAI quota handling:
+- If you hit a 429 quota error, either add billing/credits or set `use_mock_vision=true`
+  in `config.json` to run the end-to-end workflow with mock decoding.
 
 ## Example API Calls
 

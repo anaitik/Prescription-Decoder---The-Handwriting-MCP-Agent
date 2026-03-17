@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -568,10 +569,15 @@ def _check_allergy_matches(
 
 def _load_config() -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
+        "provider": "openai",
         "api_key_env": "OPENAI_API_KEY",
         "base_url": None,
         "model": "gpt-4.1-mini",
         "translation_model": "gpt-4.1-mini",
+        "groq_api_key_env": "GROQ_API_KEY",
+        "groq_base_url": "https://api.groq.com/openai/v1",
+        "groq_model": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "groq_translation_model": "meta-llama/llama-4-scout-17b-16e-instruct",
         "max_output_tokens": 512,
         "temperature": 0.2,
         "image_detail": "auto",
@@ -581,6 +587,9 @@ def _load_config() -> Dict[str, Any]:
         "twilio_auth_token_env": "TWILIO_AUTH_TOKEN",
         "twilio_from_number": "",
         "use_mock_fhir": True,
+        "use_mock_vision": False,
+        "openai_max_retries": 2,
+        "openai_retry_backoff_seconds": 1.0,
     }
     if os.path.isfile(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
@@ -588,6 +597,22 @@ def _load_config() -> Dict[str, Any]:
         if isinstance(data, dict):
             defaults.update(data)
     return defaults
+
+
+def _resolve_provider_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    provider = str(config.get("provider") or "openai").strip().lower()
+    resolved = dict(config)
+    if provider == "groq":
+        resolved["api_key_env"] = resolved.get("groq_api_key_env") or "GROQ_API_KEY"
+        if not resolved.get("base_url"):
+            resolved["base_url"] = resolved.get("groq_base_url") or "https://api.groq.com/openai/v1"
+        if resolved.get("model") in (None, "", "gpt-4.1-mini"):
+            resolved["model"] = resolved.get("groq_model") or "meta-llama/llama-4-scout-17b-16e-instruct"
+        if resolved.get("translation_model") in (None, ""):
+            resolved["translation_model"] = (
+                resolved.get("groq_translation_model") or resolved["model"]
+            )
+    return resolved
 
 
 def _get_openai_client(config: Dict[str, Any]):
@@ -607,6 +632,28 @@ def _get_openai_client(config: Dict[str, Any]):
     if base_url:
         return OpenAI(api_key=api_key, base_url=base_url)
     return OpenAI(api_key=api_key)
+
+
+def _is_insufficient_quota_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "insufficient_quota" in text or "exceeded your current quota" in text
+
+
+def _call_openai_with_retries(client, *, max_retries: int, backoff_seconds: float, **kwargs):
+    attempt = 0
+    while True:
+        try:
+            return client.responses.create(**kwargs)
+        except Exception as exc:
+            if _is_insufficient_quota_error(exc):
+                raise RuntimeError(
+                    "LLM quota exceeded. Check your plan/billing or set use_mock_vision=true."
+                ) from exc
+            if attempt >= max_retries:
+                raise
+            sleep_for = backoff_seconds * (2 ** attempt)
+            time.sleep(sleep_for)
+            attempt += 1
 
 
 @mcp.tool()
@@ -639,11 +686,37 @@ def decode_prescription(
     # Placeholder for Phase 3: use fhir_token/fhir_server_url with _fhir_auth_headers(...)
     data_url = _to_data_url(image_data, decoded)
 
-    config = _load_config()
+    config = _resolve_provider_config(_load_config())
+    if config.get("use_mock_vision"):
+        mock_items = [
+            {
+                "medication_name": "Paracetamol",
+                "dosage": "500 mg",
+                "frequency": "twice daily",
+                "duration": "3 days",
+                "instructions": "After meals",
+            },
+            {
+                "medication_name": "Amoxicillin",
+                "dosage": "250 mg",
+                "frequency": "three times daily",
+                "duration": "5 days",
+                "instructions": "",
+            },
+        ]
+        resources = [
+            _to_medication_request(item, patient_id_from_ctx).dict()
+            for item in mock_items
+        ]
+        return resources
+
     client = _get_openai_client(config)
 
     try:
-        response = client.responses.create(
+        response = _call_openai_with_retries(
+            client,
+            max_retries=int(config.get("openai_max_retries", 2)),
+            backoff_seconds=float(config.get("openai_retry_backoff_seconds", 1.0)),
             model=config.get("model"),
             input=[
                 {
@@ -808,7 +881,7 @@ def translate_to_hindi(text: str, target_language: str = "hi") -> Dict[str, str]
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text must be a non-empty string.")
 
-    config = _load_config()
+    config = _resolve_provider_config(_load_config())
     client = _get_openai_client(config)
 
     language = target_language or config.get("default_language", "hi")

@@ -1,8 +1,13 @@
 {
-  "api_key_env": "OPENAI_API_KEY",
+  "api_key_env": "GROQ_API_KEY",
   "base_url": null,
-  "model": "gpt-4.1-mini",
-  "translation_model": "gpt-4.1-mini",
+  "provider": "groq",
+  "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+  "translation_model": "meta-llama/llama-4-scout-17b-16e-instruct",
+  "groq_api_key_env": "GROQ_API_KEY",
+  "groq_base_url": "https://api.groq.com/openai/v1",
+  "groq_model": "meta-llama/llama-4-scout-17b-16e-instruct",
+  "groq_translation_model": "meta-llama/llama-4-scout-17b-16e-instruct",
   "max_output_tokens": 512,
   "temperature": 0.2,
   "image_detail": "auto",
@@ -11,5 +16,8 @@
   "twilio_account_sid_env": "TWILIO_ACCOUNT_SID",
   "twilio_auth_token_env": "TWILIO_AUTH_TOKEN",
   "twilio_from_number": "",
-  "use_mock_fhir": true
+  "use_mock_fhir": true,
+  "use_mock_vision": false,
+  "openai_max_retries": 2,
+  "openai_retry_backoff_seconds": 1.0
 }

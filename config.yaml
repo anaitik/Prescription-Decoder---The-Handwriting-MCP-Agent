@@ -63,3 +63,5 @@ permissions:
 config:
   use_mock_fhir: true
   notes: "Set to false to read patient language/phone from real FHIR Patient resources."
+  llm_provider: "groq"
+  llm_notes: "Groq uses an OpenAI-compatible endpoint; set GROQ_API_KEY."

@@ -101,6 +101,19 @@ def main() -> None:
                 response = agent.send_message(request)
 
             task = response.get("task") or {}
+            status = task.get("status") or {}
+            if status.get("state") == "TASK_STATE_FAILED":
+                message = status.get("message") or {}
+                parts = message.get("parts") or []
+                error_text = None
+                if parts:
+                    error_text = parts[0].get("text")
+                st.error(error_text or "Workflow failed.")
+                _audit_event(audit_trail, "workflow_failed", {"task_state": status})
+                st.subheader("Audit Trail")
+                st.json(audit_trail)
+                return
+
             report = _extract_report(task)
             _audit_event(audit_trail, "workflow_completed", {"task_state": task.get("status")})
 

@@ -318,6 +318,33 @@ def _med_name_from_request(med_request: MedicationRequest) -> str:
     return ""
 
 
+def _med_name_from_dict(item: Dict[str, Any]) -> str:
+    med_cc = item.get("medicationCodeableConcept") or item.get("medication") or {}
+    if isinstance(med_cc, dict):
+        text = med_cc.get("text")
+        if text:
+            return text
+        coding = med_cc.get("coding") or []
+        if coding and isinstance(coding, list):
+            first = coding[0]
+            if isinstance(first, dict):
+                return first.get("display") or first.get("code") or ""
+    med_ref = item.get("medicationReference") or {}
+    if isinstance(med_ref, dict) and med_ref.get("reference"):
+        return med_ref.get("reference") or ""
+    return ""
+
+
+def _med_name_from_any(item: Any) -> str:
+    if isinstance(item, MedicationRequest):
+        return _med_name_from_request(item)
+    if isinstance(item, dict):
+        return _med_name_from_dict(item)
+    if isinstance(item, str):
+        return item
+    return ""
+
+
 def _fetch_patient_medications(
     patient_id: str,
     fhir_token: str,
@@ -808,14 +835,13 @@ def check_drug_interactions(
 
     patient_id_from_ctx, fhir_token, fhir_server_url = _extract_sharp_context(ctx, patient_id)
 
-    new_requests: List[MedicationRequest] = []
+    new_med_names: List[str] = []
     for idx, item in enumerate(medications):
-        if not isinstance(item, dict):
-            raise ValueError(f"MedicationRequest at index {idx} must be an object.")
-        try:
-            new_requests.append(MedicationRequest(**item))
-        except Exception as exc:
-            raise ValueError(f"Invalid MedicationRequest at index {idx}: {exc}") from exc
+        if not isinstance(item, (dict, MedicationRequest, str)):
+            raise ValueError(f"MedicationRequest at index {idx} must be an object or string.")
+        med_name = _med_name_from_any(item)
+        if med_name:
+            new_med_names.append(med_name)
 
     existing_requests = _fetch_patient_medications(
         patient_id=patient_id_from_ctx,
@@ -823,9 +849,7 @@ def check_drug_interactions(
         fhir_server_url=fhir_server_url,
     )
 
-    new_med_names = [
-        _normalize_med_name(_med_name_from_request(req)) for req in new_requests
-    ]
+    new_med_names = [_normalize_med_name(name) for name in new_med_names]
     existing_med_names = [
         _normalize_med_name(_med_name_from_request(req)) for req in existing_requests
     ]

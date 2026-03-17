@@ -8,6 +8,7 @@ import streamlit as st
 import pandas as pd
 
 from a2a_agent import PrescriptionCompleterAgent
+from medication_info_agent import MedicationInfoAgent
 
 # Basic logging for healthcare demos; use structured logging in production.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -116,6 +117,7 @@ def main() -> None:
                 return
 
             report = _extract_report(task)
+            st.session_state["latest_report"] = report
             _audit_event(audit_trail, "workflow_completed", {"task_state": task.get("status")})
 
             col1, col2 = st.columns(2)
@@ -186,6 +188,40 @@ def main() -> None:
             LOGGER.exception("Workflow failed")
             _audit_event(audit_trail, "workflow_failed", {"error": str(exc)})
             st.error(f"Workflow failed: {exc}")
+
+    st.divider()
+    st.subheader("Medication Details")
+    st.write("Get detailed explanations of each medication and what conditions it treats.")
+    if st.button("Explain Medications"):
+        report = st.session_state.get("latest_report") or {}
+        meds = report.get("prescription") or []
+        if not meds:
+            st.error("Run the workflow first to extract medications.")
+            return
+        try:
+            agent = MedicationInfoAgent()
+            request = {
+                "message": {
+                    "role": "ROLE_USER",
+                    "parts": [{"data": {"medications": meds}}],
+                }
+            }
+            response = agent.send_message(request)
+            task = response.get("task") or {}
+            artifacts = task.get("artifacts") or []
+            explanations = {}
+            if artifacts:
+                for part in artifacts[0].get("parts", []):
+                    if part.get("mediaType") == "application/json":
+                        explanations = part.get("data") or {}
+
+            rows = explanations.get("explanations") or []
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            else:
+                st.write("No explanations returned.")
+        except Exception as exc:
+            st.error(f"Medication explanation failed: {exc}")
 
 
 if __name__ == "__main__":

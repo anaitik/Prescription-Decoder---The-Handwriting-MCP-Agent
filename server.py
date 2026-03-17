@@ -45,6 +45,12 @@ TRANSLATION_PROMPT = (
     "Preserve medication names, dosages, and instructions accurately. "
     "Do not add new medical advice. Text:\n\n{text}"
 )
+MED_INFO_PROMPT = (
+    "You are a clinical assistant. For each medication in the list below, provide a concise, "
+    "patient-friendly explanation of why it is used and the diseases/conditions it commonly treats. "
+    "Return ONLY a valid JSON array. Each item must include: medication_name, why_used, "
+    "common_conditions. Do not include any extra text or markdown.\n\nMedications:\n{med_list}"
+)
 FHIR_ID_PATTERN = re.compile(r"^[A-Za-z0-9\-\.]{1,64}$")
 
 mcp = FastMCP("Prescription Decoder", json_response=True)
@@ -1031,6 +1037,57 @@ def send_sms(phone_number: str, message: str) -> Dict[str, str]:
         raise RuntimeError(f"SMS send failed: {exc}") from exc
 
     return {"status": "sent", "sid": getattr(message_obj, "sid", ""), "to": phone_number}
+
+
+@mcp.tool()
+def explain_medications(medications: List[Any]) -> List[Dict[str, Any]]:
+    """Return patient-friendly explanations for a list of medications."""
+    if not isinstance(medications, list) or not medications:
+        raise ValueError("medications must be a non-empty list.")
+
+    names = []
+    for item in medications:
+        name = _med_name_from_any(item)
+        if not name and isinstance(item, dict):
+            name = str(item.get("medication_name") or item.get("name") or "")
+        if name:
+            names.append(name)
+
+    if not names:
+        raise ValueError("No medication names could be extracted.")
+
+    config = _resolve_provider_config(_load_config())
+    if config.get("use_mock_vision"):
+        return [
+            {
+                "medication_name": name,
+                "why_used": "Used for symptom control based on standard clinical practice.",
+                "common_conditions": "Common conditions as per typical prescribing.",
+            }
+            for name in names
+        ]
+
+    client = _get_openai_client(config)
+    prompt = MED_INFO_PROMPT.format(med_list="\n".join(f"- {n}" for n in names))
+
+    try:
+        response = _call_openai_with_retries(
+            client,
+            max_retries=int(config.get("openai_max_retries", 2)),
+            backoff_seconds=float(config.get("openai_retry_backoff_seconds", 1.0)),
+            model=config.get("model"),
+            input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            temperature=0.2,
+            max_output_tokens=512,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Medication info API call failed: {exc}") from exc
+
+    output_text = getattr(response, "output_text", None)
+    if not output_text:
+        raise RuntimeError("Medication info API returned no text output.")
+
+    return _extract_json_array(output_text)
 
 
 def _test_decode_prescription() -> None:

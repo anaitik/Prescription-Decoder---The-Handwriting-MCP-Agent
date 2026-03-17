@@ -6,7 +6,8 @@ This repository provides a healthcare-focused MCP server and an A2A-compliant ag
 Key capabilities:
 1. MCP tools for prescription decoding, interaction checks, allergy checks, translation, and SMS delivery.
 2. A2A agent orchestration with task lifecycle support (submitted, working, completed, failed).
-3. FHIR-aware output and SHARP context handling for patient identity and access tokens.
+3. A medication info agent to explain medications and common indications.
+4. FHIR-aware output and SHARP context handling for patient identity and access tokens.
 
 ## Architecture Diagram (Text)
 ```
@@ -122,6 +123,18 @@ A2A async request (return immediately):
 {
   "message": { "...": "..." },
   "configuration": { "returnImmediately": true }
+}
+```
+
+Medication info agent request:
+```json
+{
+  "message": {
+    "role": "ROLE_USER",
+    "parts": [
+      { "data": { "medications": [ { "resourceType": "MedicationRequest", "...": "..." } ] } }
+    ]
+  }
 }
 ```
 

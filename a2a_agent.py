@@ -412,10 +412,8 @@ class PrescriptionCompleterAgent:
         if meds:
             lines.append("Medications:")
             for med in meds:
-                med_name = (
-                    (med.get("medicationCodeableConcept") or {}).get("text")
-                    or "Medication"
-                )
+                med_cc = med.get("medicationCodeableConcept") or med.get("medication") or {}
+                med_name = (med_cc.get("text") if isinstance(med_cc, dict) else None) or "Medication"
                 dosage_instr = ""
                 dosage_instructions = med.get("dosageInstruction") or []
                 if dosage_instructions:

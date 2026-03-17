@@ -23,6 +23,10 @@ try:
     from fhir.resources.medicationrequest import MedicationRequest
     from fhir.resources.reference import Reference
     from fhir.resources.timing import Timing, TimingRepeat
+    try:
+        from fhir.resources.codeablereference import CodeableReference
+    except Exception:
+        CodeableReference = None  # type: ignore
 except Exception as exc:  # pragma: no cover - runtime dependency
     raise RuntimeError(
         "fhir.resources is not installed. Install it with: pip install fhir.resources"
@@ -268,14 +272,38 @@ def _to_medication_request(
 
     subject_ref = Reference(reference=f"Patient/{patient_id}") if patient_id else None
 
-    return MedicationRequest(
-        status="active",
-        intent="order",
-        medicationCodeableConcept=med_concept,
-        subject=subject_ref,
-        dosageInstruction=[dosage_instruction],
-        note=notes or None,
-    )
+    med_field = "medicationCodeableConcept"
+    try:
+        model_fields = getattr(MedicationRequest, "model_fields", {}) or {}
+        if "medicationCodeableConcept" in model_fields:
+            med_field = "medicationCodeableConcept"
+        elif "medication" in model_fields:
+            med_field = "medication"
+    except Exception:
+        med_field = "medicationCodeableConcept"
+
+    if med_field == "medication":
+        # R5 uses CodeableReference for MedicationRequest.medication
+        if CodeableReference is not None:
+            try:
+                med_value: Any = CodeableReference(concept=med_concept)
+            except Exception:
+                med_value = med_concept
+        else:
+            med_value = med_concept
+    else:
+        med_value = med_concept
+
+    payload: Dict[str, Any] = {
+        "status": "active",
+        "intent": "order",
+        med_field: med_value,
+        "subject": subject_ref,
+        "dosageInstruction": [dosage_instruction],
+        "note": notes or None,
+    }
+
+    return MedicationRequest(**payload)
 
 
 def _normalize_med_name(name: str) -> str:
@@ -301,6 +329,10 @@ def _normalize_med_name(name: str) -> str:
 
 def _med_name_from_request(med_request: MedicationRequest) -> str:
     med_cc = getattr(med_request, "medicationCodeableConcept", None)
+    if not med_cc:
+        med_cc = getattr(med_request, "medication", None)
+        if CodeableReference is not None and isinstance(med_cc, CodeableReference):
+            med_cc = med_cc.concept or med_cc.reference
     if med_cc:
         if getattr(med_cc, "text", None):
             return med_cc.text
@@ -321,6 +353,8 @@ def _med_name_from_request(med_request: MedicationRequest) -> str:
 def _med_name_from_dict(item: Dict[str, Any]) -> str:
     med_cc = item.get("medicationCodeableConcept") or item.get("medication") or {}
     if isinstance(med_cc, dict):
+        if "concept" in med_cc and isinstance(med_cc.get("concept"), dict):
+            med_cc = med_cc.get("concept") or {}
         text = med_cc.get("text")
         if text:
             return text
@@ -894,15 +928,12 @@ def check_allergies(
 
     med_names: List[str] = []
     for idx, item in enumerate(new_medications):
-        if isinstance(item, str):
-            med_names.append(item)
-        elif isinstance(item, dict):
-            # Accept MedicationRequest dict or generic medication object
-            try:
-                req = MedicationRequest(**item)
-                med_names.append(_med_name_from_request(req))
-            except Exception:
-                med_names.append(str(item.get("medication_name") or item.get("name") or ""))
+        if isinstance(item, (dict, MedicationRequest, str)):
+            name = _med_name_from_any(item)
+            if not name and isinstance(item, dict):
+                name = str(item.get("medication_name") or item.get("name") or "")
+            if name:
+                med_names.append(name)
         else:
             raise ValueError(f"Medication entry at index {idx} is not supported.")
 

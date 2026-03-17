@@ -2,10 +2,11 @@ import base64
 import binascii
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 try:
     from fhir.resources.annotation import Annotation
@@ -27,6 +28,7 @@ PROMPT = (
     "duration, and instructions. If something is unclear, make your best guess and note "
     "it with a 'confidence: low' field."
 )
+FHIR_ID_PATTERN = re.compile(r"^[A-Za-z0-9\-\.]{1,64}$")
 
 mcp = FastMCP("Prescription Decoder", json_response=True)
 
@@ -59,6 +61,90 @@ def _to_data_url(original: str, decoded: bytes) -> str:
     mime = _detect_mime(decoded)
     encoded = base64.b64encode(decoded).decode("ascii")
     return f"data:{mime};base64,{encoded}"
+
+
+def _normalize_patient_id(value: str) -> str:
+    candidate = value.strip()
+    if candidate.lower().startswith("patient/"):
+        candidate = candidate.split("/", 1)[1]
+    if not FHIR_ID_PATTERN.fullmatch(candidate):
+        raise ValueError(
+            "Invalid patient_id format. Expected a FHIR id matching "
+            "[A-Za-z0-9-\\.]{1,64}."
+        )
+    return candidate
+
+
+def _get_request_headers(ctx: Optional[Context]) -> Dict[str, str]:
+    if ctx is None:
+        return {}
+    try:
+        request_obj = ctx.request_context.request
+    except Exception:
+        return {}
+    if request_obj is None:
+        return {}
+
+    headers: Dict[str, str] = {}
+    if hasattr(request_obj, "headers"):
+        try:
+            headers = dict(request_obj.headers)
+        except Exception:
+            headers = {}
+
+    if not headers and hasattr(request_obj, "scope"):
+        scope = getattr(request_obj, "scope")
+        if isinstance(scope, dict):
+            raw_headers = scope.get("headers") or []
+            for key, value in raw_headers:
+                try:
+                    headers[key.decode("latin-1")] = value.decode("latin-1")
+                except Exception:
+                    continue
+
+    return {str(k).lower(): str(v) for k, v in headers.items()}
+
+
+def _get_meta_value(meta: Any, key: str) -> Optional[str]:
+    if meta is None:
+        return None
+    if isinstance(meta, dict):
+        return meta.get(key)
+    return getattr(meta, key, None)
+
+
+def _extract_sharp_context(
+    ctx: Optional[Context],
+    patient_id_param: Optional[str],
+) -> Tuple[str, str, Optional[str]]:
+    headers = _get_request_headers(ctx)
+    meta = None
+    try:
+        meta = ctx.request_context.meta if ctx else None
+    except Exception:
+        meta = None
+
+    patient_id = (
+        headers.get("x-patient-id")
+        or _get_meta_value(meta, "patient_id")
+        or patient_id_param
+    )
+    fhir_token = headers.get("x-fhir-access-token") or _get_meta_value(meta, "fhir_access_token")
+    fhir_server_url = headers.get("x-fhir-server-url") or _get_meta_value(meta, "fhir_server_url")
+
+    if fhir_token and fhir_token.lower().startswith("bearer "):
+        fhir_token = fhir_token[7:].strip()
+
+    if not patient_id or not fhir_token:
+        raise ValueError(
+            "Missing SHARP context. Provide X-Patient-ID and X-FHIR-Access-Token headers."
+        )
+
+    return _normalize_patient_id(patient_id), fhir_token, fhir_server_url
+
+
+def _fhir_auth_headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
 
 
 def medication_to_rxnorm(med_name: str) -> Optional[Tuple[str, str]]:
@@ -209,8 +295,18 @@ def _get_openai_client(config: Dict[str, Any]):
 
 
 @mcp.tool()
-def decode_prescription(image_data: str, patient_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Decode a base64-encoded prescription image into medication text."""
+def decode_prescription(
+    image_data: str,
+    patient_id: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> List[Dict[str, Any]]:
+    """Decode a base64-encoded prescription image into MedicationRequest resources.
+
+    Expected SHARP context (Streamable HTTP headers):
+    - X-Patient-ID: FHIR Patient id (regex [A-Za-z0-9-\\.]{1,64})
+    - X-FHIR-Access-Token: Bearer token (with or without "Bearer " prefix)
+    - X-FHIR-Server-URL: Optional, used for downstream FHIR calls
+    """
     if not isinstance(image_data, str) or not image_data.strip():
         raise ValueError("image_data is required and must be a non-empty base64 string.")
 
@@ -224,6 +320,8 @@ def decode_prescription(image_data: str, patient_id: Optional[str] = None) -> Li
     if not decoded:
         raise ValueError("image_data decoded to empty bytes.")
 
+    patient_id_from_ctx, fhir_token, fhir_server_url = _extract_sharp_context(ctx, patient_id)
+    # Placeholder for Phase 3: use fhir_token/fhir_server_url with _fhir_auth_headers(...)
     data_url = _to_data_url(image_data, decoded)
 
     config = _load_config()
@@ -266,7 +364,7 @@ def decode_prescription(image_data: str, patient_id: Optional[str] = None) -> Li
     resources = []
     for item in parsed:
         if isinstance(item, dict):
-            resources.append(_to_medication_request(item, patient_id).dict())
+            resources.append(_to_medication_request(item, patient_id_from_ctx).dict())
     return resources
 
 

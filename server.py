@@ -3,9 +3,22 @@ import binascii
 import json
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
+
+try:
+    from fhir.resources.annotation import Annotation
+    from fhir.resources.codeableconcept import CodeableConcept
+    from fhir.resources.coding import Coding
+    from fhir.resources.dosage import Dosage
+    from fhir.resources.medicationrequest import MedicationRequest
+    from fhir.resources.reference import Reference
+    from fhir.resources.timing import Timing, TimingRepeat
+except Exception as exc:  # pragma: no cover - runtime dependency
+    raise RuntimeError(
+        "fhir.resources is not installed. Install it with: pip install fhir.resources"
+    ) from exc
 
 CONFIG_PATH = os.getenv("MCP_CONFIG_PATH", os.path.join(os.path.dirname(__file__), "config.json"))
 PROMPT = (
@@ -48,6 +61,117 @@ def _to_data_url(original: str, decoded: bytes) -> str:
     return f"data:{mime};base64,{encoded}"
 
 
+def medication_to_rxnorm(med_name: str) -> Optional[Tuple[str, str]]:
+    if not med_name:
+        return None
+    normalized = med_name.strip().lower()
+    mapping = {
+        "paracetamol": ("161", "Paracetamol"),
+        "acetaminophen": ("161", "Acetaminophen"),
+        "amoxicillin": ("723", "Amoxicillin"),
+        "ibuprofen": ("5640", "Ibuprofen"),
+        "azithromycin": ("18631", "Azithromycin"),
+        "metformin": ("6809", "Metformin"),
+        "omeprazole": ("7646", "Omeprazole"),
+        "pantoprazole": ("40790", "Pantoprazole"),
+    }
+    for key, value in mapping.items():
+        if key in normalized:
+            return value
+    return None
+
+
+def _parse_frequency(frequency: str) -> Optional[Tuple[int, float, str]]:
+    if not frequency:
+        return None
+    text = frequency.strip().lower()
+    if "once daily" in text or "once a day" in text or "daily" == text:
+        return (1, 1.0, "d")
+    if "twice daily" in text or "twice a day" in text:
+        return (2, 1.0, "d")
+    if "three times daily" in text or "3 times daily" in text or "thrice daily" in text:
+        return (3, 1.0, "d")
+    if "every" in text and "hour" in text:
+        parts = text.replace("-", " ").split()
+        for i, token in enumerate(parts):
+            if token.isdigit() and i + 1 < len(parts) and "hour" in parts[i + 1]:
+                return (1, float(token), "h")
+    return None
+
+
+def _parse_duration(duration: str) -> Optional[Tuple[float, str]]:
+    if not duration:
+        return None
+    text = duration.strip().lower().replace("-", " ")
+    parts = text.split()
+    for i, token in enumerate(parts):
+        if token.replace(".", "", 1).isdigit() and i + 1 < len(parts):
+            unit = parts[i + 1]
+            if unit.startswith("day"):
+                return (float(token), "d")
+            if unit.startswith("week"):
+                return (float(token), "wk")
+            if unit.startswith("month"):
+                return (float(token), "mo")
+    return None
+
+
+def _build_dosage(frequency: str, duration: str, instructions: str) -> Dosage:
+    dosage = Dosage()
+    dosage.text = " ".join(part for part in [frequency, duration, instructions] if part).strip() or None
+
+    repeat = TimingRepeat()
+    freq_tuple = _parse_frequency(frequency)
+    if freq_tuple:
+        repeat.frequency, repeat.period, repeat.periodUnit = freq_tuple
+    dur_tuple = _parse_duration(duration)
+    if dur_tuple:
+        repeat.duration, repeat.durationUnit = dur_tuple
+
+    if repeat.frequency or repeat.duration:
+        dosage.timing = Timing(repeat=repeat)
+
+    return dosage
+
+
+def _to_medication_request(
+    item: Dict[str, Any],
+    patient_id: Optional[str],
+) -> MedicationRequest:
+    med_name = str(item.get("medication_name") or "").strip()
+    dosage = str(item.get("dosage") or "").strip()
+    frequency = str(item.get("frequency") or "").strip()
+    duration = str(item.get("duration") or "").strip()
+    instructions = str(item.get("instructions") or "").strip()
+
+    rxnorm = medication_to_rxnorm(med_name)
+    coding_list = []
+    notes = []
+
+    if rxnorm:
+        code, display = rxnorm
+        coding_list.append(Coding(system="http://www.nlm.nih.gov/research/umls/rxnorm", code=code, display=display))
+    else:
+        notes.append(Annotation(text="RxNorm code not found."))
+
+    if str(item.get("confidence", "")).lower() == "low":
+        notes.append(Annotation(text="Confidence: low."))
+
+    med_concept = CodeableConcept(text=med_name or None, coding=coding_list or None)
+    dosage_instruction = _build_dosage(frequency, duration, " ".join([dosage, instructions]).strip())
+
+    subject_ref = Reference(reference=f"Patient/{patient_id}") if patient_id else None
+
+    return MedicationRequest(
+        status="active",
+        intent="order",
+        medicationCodeableConcept=med_concept,
+        subject=subject_ref,
+        dosageInstruction=[dosage_instruction],
+        note=notes or None,
+    )
+
+
 def _load_config() -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
         "api_key_env": "OPENAI_API_KEY",
@@ -85,7 +209,7 @@ def _get_openai_client(config: Dict[str, Any]):
 
 
 @mcp.tool()
-def decode_prescription(image_data: str) -> List[Dict[str, Any]]:
+def decode_prescription(image_data: str, patient_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Decode a base64-encoded prescription image into medication text."""
     if not isinstance(image_data, str) or not image_data.strip():
         raise ValueError("image_data is required and must be a non-empty base64 string.")
@@ -139,7 +263,11 @@ def decode_prescription(image_data: str) -> List[Dict[str, Any]]:
     if not isinstance(parsed, list):
         raise RuntimeError("Vision API response JSON must be an array.")
 
-    return parsed
+    resources = []
+    for item in parsed:
+        if isinstance(item, dict):
+            resources.append(_to_medication_request(item, patient_id).dict())
+    return resources
 
 
 def _test_decode_prescription() -> None:

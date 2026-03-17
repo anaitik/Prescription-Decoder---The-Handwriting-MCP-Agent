@@ -28,6 +28,11 @@ PROMPT = (
     "duration, and instructions. If something is unclear, make your best guess and note "
     "it with a 'confidence: low' field."
 )
+TRANSLATION_PROMPT = (
+    "Translate the following medical text into {language}. "
+    "Preserve medication names, dosages, and instructions accurately. "
+    "Do not add new medical advice. Text:\n\n{text}"
+)
 FHIR_ID_PATTERN = re.compile(r"^[A-Za-z0-9\-\.]{1,64}$")
 
 mcp = FastMCP("Prescription Decoder", json_response=True)
@@ -328,6 +333,22 @@ def _fetch_patient_medications(
     return [_to_medication_request(item, patient_id) for item in mock_items]
 
 
+def _fetch_patient_profile(
+    patient_id: str,
+    fhir_token: str,
+    fhir_server_url: Optional[str],
+) -> Dict[str, Any]:
+    _ = _fhir_auth_headers(fhir_token)
+    # Mock implementation for development. In production, call:
+    # GET {fhir_server_url}/Patient/{patient_id} and related Preference/Communication.
+    return {
+        "patient_id": patient_id,
+        "phone_number": "+919000000000",
+        "preferred_language": "hi",
+        "display_name": "Patient",
+    }
+
+
 def _find_interactions(
     new_meds: List[str],
     existing_meds: List[str],
@@ -476,9 +497,15 @@ def _load_config() -> Dict[str, Any]:
         "api_key_env": "OPENAI_API_KEY",
         "base_url": None,
         "model": "gpt-4.1-mini",
+        "translation_model": "gpt-4.1-mini",
         "max_output_tokens": 512,
         "temperature": 0.2,
         "image_detail": "auto",
+        "default_language": "hi",
+        "prescription_view_url": "https://example.com/prescriptions",
+        "twilio_account_sid_env": "TWILIO_ACCOUNT_SID",
+        "twilio_auth_token_env": "TWILIO_AUTH_TOKEN",
+        "twilio_from_number": "",
     }
     if os.path.isfile(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
@@ -695,6 +722,80 @@ def check_allergies(
             "Cross-reactivity rules are simplified (e.g., penicillin -> beta-lactams).",
         ],
     }
+
+
+@mcp.tool()
+def translate_to_hindi(text: str, target_language: str = "hi") -> Dict[str, str]:
+    """Translate English medical text into Hindi or another Indian language.
+
+    target_language can be a language code like "hi" or a language name like "Hindi".
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text must be a non-empty string.")
+
+    config = _load_config()
+    client = _get_openai_client(config)
+
+    language = target_language or config.get("default_language", "hi")
+    prompt = TRANSLATION_PROMPT.format(language=language, text=text.strip())
+
+    try:
+        response = client.responses.create(
+            model=config.get("translation_model") or config.get("model"),
+            input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            temperature=0.2,
+            max_output_tokens=512,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Translation API call failed: {exc}") from exc
+
+    output_text = getattr(response, "output_text", None)
+    if not output_text:
+        raise RuntimeError("Translation API returned no text output.")
+
+    return {"language": language, "translated_text": output_text.strip()}
+
+
+@mcp.tool()
+def send_sms(phone_number: str, message: str) -> Dict[str, str]:
+    """Send an SMS to a patient using Twilio (or compatible provider)."""
+    if not phone_number or not isinstance(phone_number, str):
+        raise ValueError("phone_number must be a non-empty string.")
+    if not message or not isinstance(message, str):
+        raise ValueError("message must be a non-empty string.")
+
+    config = _load_config()
+    account_sid_env = config.get("twilio_account_sid_env") or "TWILIO_ACCOUNT_SID"
+    auth_token_env = config.get("twilio_auth_token_env") or "TWILIO_AUTH_TOKEN"
+    from_number = config.get("twilio_from_number") or ""
+
+    account_sid = os.getenv(account_sid_env)
+    auth_token = os.getenv(auth_token_env)
+    if not account_sid or not auth_token:
+        raise ValueError(
+            f"Missing Twilio credentials. Set {account_sid_env} and {auth_token_env}."
+        )
+    if not from_number:
+        raise ValueError("Missing Twilio from number in config.json (twilio_from_number).")
+
+    try:
+        from twilio.rest import Client
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError(
+            "Twilio SDK is not installed. Install it with: pip install twilio"
+        ) from exc
+
+    try:
+        client = Client(account_sid, auth_token)
+        message_obj = client.messages.create(
+            body=message,
+            from_=from_number,
+            to=phone_number,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"SMS send failed: {exc}") from exc
+
+    return {"status": "sent", "sid": getattr(message_obj, "sid", ""), "to": phone_number}
 
 
 def _test_decode_prescription() -> None:

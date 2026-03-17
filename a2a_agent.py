@@ -3,7 +3,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
-from server import check_allergies, check_drug_interactions, decode_prescription
+from server import (
+    _fetch_patient_profile,
+    _load_config,
+    check_allergies,
+    check_drug_interactions,
+    decode_prescription,
+    send_sms,
+    translate_to_hindi,
+)
 
 STATE_SUBMITTED = "TASK_STATE_SUBMITTED"
 STATE_WORKING = "TASK_STATE_WORKING"
@@ -280,7 +288,40 @@ class PrescriptionCompleterAgent:
             ctx=ctx,
         )
 
+        config = _load_config()
+        profile = _fetch_patient_profile(
+            patient_id=patient_id,
+            fhir_token=fhir_access_token,
+            fhir_server_url=fhir_server_url,
+        )
+        preferred_language = (
+            profile.get("preferred_language")
+            or config.get("default_language")
+            or "hi"
+        )
+        phone_number = profile.get("phone_number")
+
         summary = self._summarize_results(meds, interaction_reports, allergy_report)
+        patient_friendly = self._build_patient_friendly_text(
+            meds, interaction_reports, allergy_report, config.get("prescription_view_url")
+        )
+
+        translated_text = patient_friendly
+        translation_result = None
+        sms_result = None
+        try:
+            translation_result = translate_to_hindi(
+                text=patient_friendly, target_language=preferred_language
+            )
+            translated_text = translation_result.get("translated_text") or translated_text
+        except Exception:
+            translation_result = {"language": preferred_language, "translated_text": patient_friendly}
+
+        if phone_number:
+            try:
+                sms_result = send_sms(phone_number=phone_number, message=translated_text)
+            except Exception as exc:
+                sms_result = {"status": "failed", "error": str(exc), "to": phone_number}
 
         report_payload = {
             "patient_id": patient_id,
@@ -288,6 +329,9 @@ class PrescriptionCompleterAgent:
             "interaction_warnings": interaction_reports,
             "allergy_alerts": allergy_report.get("warnings") or [],
             "summary": summary,
+            "patient_message": translated_text,
+            "language": preferred_language,
+            "sms_status": sms_result,
         }
 
         artifacts = [
@@ -298,6 +342,7 @@ class PrescriptionCompleterAgent:
                 "parts": [
                     {"data": report_payload, "mediaType": "application/json"},
                     {"text": summary, "mediaType": "text/plain"},
+                    {"text": translated_text, "mediaType": "text/plain"},
                 ],
             }
         ]
@@ -346,6 +391,47 @@ class PrescriptionCompleterAgent:
             "Please review these results with your healthcare provider before starting any medication."
         )
         return " ".join(summary_lines)
+
+    @staticmethod
+    def _build_patient_friendly_text(
+        meds: List[Dict[str, Any]],
+        interactions: List[Dict[str, Any]],
+        allergies: Dict[str, Any],
+        prescription_link_base: Optional[str],
+    ) -> str:
+        lines: List[str] = ["Your prescription summary:"]
+        if meds:
+            lines.append("Medications:")
+            for med in meds:
+                med_name = (
+                    (med.get("medicationCodeableConcept") or {}).get("text")
+                    or "Medication"
+                )
+                dosage_instr = ""
+                dosage_instructions = med.get("dosageInstruction") or []
+                if dosage_instructions:
+                    dosage_instr = dosage_instructions[0].get("text") or ""
+                lines.append(f"- {med_name} {dosage_instr}".strip())
+        if interactions:
+            lines.append("Important interaction warnings:")
+            for interaction in interactions:
+                lines.append(
+                    f"- {interaction.get('medications')}: {interaction.get('description')} "
+                    f"({interaction.get('severity')})"
+                )
+        if allergies.get("warnings"):
+            lines.append("Allergy alerts:")
+            for warning in allergies["warnings"]:
+                lines.append(
+                    f"- {warning.get('medication')} vs {warning.get('allergy')}: "
+                    f"{warning.get('note')} ({warning.get('criticality')})"
+                )
+
+        if prescription_link_base:
+            lines.append(f"View your full prescription here: {prescription_link_base}")
+
+        lines.append("If you have questions, contact your healthcare provider.")
+        return "\n".join(lines)
 
 
 if __name__ == "__main__":

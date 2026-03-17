@@ -2,7 +2,13 @@
   "api_key_env": "OPENAI_API_KEY",
   "base_url": null,
   "model": "gpt-4.1-mini",
+  "translation_model": "gpt-4.1-mini",
   "max_output_tokens": 512,
   "temperature": 0.2,
-  "image_detail": "auto"
+  "image_detail": "auto",
+  "default_language": "hi",
+  "prescription_view_url": "https://example.com/prescriptions",
+  "twilio_account_sid_env": "TWILIO_ACCOUNT_SID",
+  "twilio_auth_token_env": "TWILIO_AUTH_TOKEN",
+  "twilio_from_number": ""
 }

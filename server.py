@@ -370,6 +370,107 @@ def _find_interactions(
     return interactions
 
 
+def _fetch_patient_allergies(
+    patient_id: str,
+    fhir_token: str,
+    fhir_server_url: Optional[str],
+) -> List[Dict[str, Any]]:
+    _ = _fhir_auth_headers(fhir_token)
+    # Mock implementation for development. In production, call:
+    # GET {fhir_server_url}/AllergyIntolerance?patient=Patient/{patient_id}
+    return [
+        {"substance": "Penicillin", "criticality": "high", "reaction": "Rash"},
+        {"substance": "Sulfa", "criticality": "high", "reaction": "Anaphylaxis"},
+    ]
+
+
+def _med_class_from_name(name: str) -> Optional[str]:
+    text = _normalize_med_name(name)
+    beta_lactams = [
+        "penicillin",
+        "amoxicillin",
+        "ampicillin",
+        "cephalexin",
+        "ceftriaxone",
+        "cefixime",
+        "cephalosporin",
+    ]
+    sulfonamides = [
+        "sulfa",
+        "sulfamethoxazole",
+        "sulfonamide",
+        "co-trimoxazole",
+        "trimethoprim-sulfamethoxazole",
+    ]
+    if any(item in text for item in beta_lactams):
+        return "beta-lactam"
+    if any(item in text for item in sulfonamides):
+        return "sulfonamide"
+    if "aspirin" in text or "ibuprofen" in text or "naproxen" in text:
+        return "nsaid"
+    return None
+
+
+def _normalize_allergy_name(name: str) -> str:
+    if not name:
+        return ""
+    text = name.strip().lower()
+    aliases = {
+        "penicillin": "penicillin",
+        "pcn": "penicillin",
+        "beta-lactam": "beta-lactam",
+        "cephalosporin": "beta-lactam",
+        "sulfa": "sulfonamide",
+        "sulfonamide": "sulfonamide",
+        "nsaid": "nsaid",
+        "aspirin": "nsaid",
+    }
+    for key, value in aliases.items():
+        if key in text:
+            return value
+    return text
+
+
+def _check_allergy_matches(
+    new_meds: List[str],
+    allergies: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    warnings: List[Dict[str, str]] = []
+    normalized_allergies = [
+        _normalize_allergy_name(str(item.get("substance") or "")) for item in allergies
+    ]
+
+    for med in new_meds:
+        med_name = _normalize_med_name(med)
+        med_class = _med_class_from_name(med_name)
+        for allergy_raw, allergy_norm in zip(allergies, normalized_allergies):
+            allergy_name = allergy_norm
+            if not allergy_name:
+                continue
+            direct_match = allergy_name in med_name or med_name in allergy_name
+            cross_reactive = False
+            if allergy_name == "penicillin" and med_class == "beta-lactam":
+                cross_reactive = True
+            if allergy_name == "beta-lactam" and med_class == "beta-lactam":
+                cross_reactive = True
+            if allergy_name == "sulfonamide" and med_class == "sulfonamide":
+                cross_reactive = True
+            if allergy_name == "nsaid" and med_class == "nsaid":
+                cross_reactive = True
+
+            if direct_match or cross_reactive:
+                warnings.append(
+                    {
+                        "medication": med,
+                        "allergy": str(allergy_raw.get("substance") or allergy_name),
+                        "criticality": str(allergy_raw.get("criticality") or "unknown"),
+                        "reaction": str(allergy_raw.get("reaction") or "unspecified"),
+                        "note": "Direct match" if direct_match else "Possible cross-reactivity",
+                    }
+                )
+    return warnings
+
+
 def _load_config() -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
         "api_key_env": "OPENAI_API_KEY",
@@ -537,6 +638,61 @@ def check_drug_interactions(
         "notes": [
             "Interaction checks use a mocked database for development.",
             "Replace with a real drug interaction source (e.g., RxNav or Drugs.com) in production.",
+        ],
+    }
+
+
+@mcp.tool()
+def check_allergies(
+    new_medications: List[Any],
+    patient_id: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> Dict[str, Any]:
+    """Check new medications against patient allergies (AllergyIntolerance).
+
+    Expected SHARP context (Streamable HTTP headers):
+    - X-Patient-ID: FHIR Patient id (regex [A-Za-z0-9-\\.]{1,64})
+    - X-FHIR-Access-Token: Bearer token (with or without "Bearer " prefix)
+    - X-FHIR-Server-URL: Optional, used for downstream FHIR calls
+
+    Note: Uses mocked allergy data for development.
+    """
+    if not isinstance(new_medications, list) or not new_medications:
+        raise ValueError("new_medications must be a non-empty list.")
+
+    patient_id_from_ctx, fhir_token, fhir_server_url = _extract_sharp_context(ctx, patient_id)
+
+    med_names: List[str] = []
+    for idx, item in enumerate(new_medications):
+        if isinstance(item, str):
+            med_names.append(item)
+        elif isinstance(item, dict):
+            # Accept MedicationRequest dict or generic medication object
+            try:
+                req = MedicationRequest(**item)
+                med_names.append(_med_name_from_request(req))
+            except Exception:
+                med_names.append(str(item.get("medication_name") or item.get("name") or ""))
+        else:
+            raise ValueError(f"Medication entry at index {idx} is not supported.")
+
+    med_names = [name for name in med_names if name]
+    allergies = _fetch_patient_allergies(
+        patient_id=patient_id_from_ctx,
+        fhir_token=fhir_token,
+        fhir_server_url=fhir_server_url,
+    )
+    warnings = _check_allergy_matches(med_names, allergies)
+
+    return {
+        "patient_id": patient_id_from_ctx,
+        "warning_count": len(warnings),
+        "warnings": warnings,
+        "checked_new_medications": med_names,
+        "allergies_checked": allergies,
+        "notes": [
+            "Allergy checks use mocked FHIR data for development.",
+            "Cross-reactivity rules are simplified (e.g., penicillin -> beta-lactams).",
         ],
     }
 

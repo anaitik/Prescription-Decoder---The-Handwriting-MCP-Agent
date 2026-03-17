@@ -33,7 +33,7 @@ FHIR MedicationRequest + Safety Report + Patient Summary
 
 Suggested install:
 ```bash
-pip install mcp openai fhir.resources twilio requests
+pip install mcp openai fhir.resources twilio requests python-dotenv
 ```
 
 Run the demo:
@@ -60,6 +60,13 @@ SHARP context headers expected on requests:
 - `X-Patient-ID`
 - `X-FHIR-Access-Token`
 - `X-FHIR-Server-URL` (optional)
+
+`.env` format (loaded automatically on startup):
+```
+OPENAI_API_KEY=...
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+```
 
 FHIR patient preferences:
 - The agent reads patient language and phone from the FHIR `Patient` resource (`communication` and `telecom`).

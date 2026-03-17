@@ -10,6 +10,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from mcp.server.fastmcp import Context, FastMCP
 
 try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
+
+try:
     from fhir.resources.annotation import Annotation
     from fhir.resources.codeableconcept import CodeableConcept
     from fhir.resources.coding import Coding
@@ -38,6 +43,9 @@ FHIR_ID_PATTERN = re.compile(r"^[A-Za-z0-9\-\.]{1,64}$")
 
 mcp = FastMCP("Prescription Decoder", json_response=True)
 LOGGER = logging.getLogger("prescription_mcp")
+
+if load_dotenv:
+    load_dotenv(os.getenv("MCP_DOTENV_PATH", ".env"))
 
 
 def _normalize_base64(image_data: str) -> str:

@@ -5,6 +5,11 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from server import check_allergies, check_drug_interactions, decode_prescription
 
+STATE_SUBMITTED = "TASK_STATE_SUBMITTED"
+STATE_WORKING = "TASK_STATE_WORKING"
+STATE_COMPLETED = "TASK_STATE_COMPLETED"
+STATE_FAILED = "TASK_STATE_FAILED"
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -22,6 +27,7 @@ def _new_message(
         "messageId": message_id or str(uuid.uuid4()),
         "role": role,
         "parts": parts,
+        "kind": "message",
     }
     if context_id:
         msg["contextId"] = context_id
@@ -45,7 +51,12 @@ def _task_object(
     if message:
         status["message"] = message
 
-    task: Dict[str, Any] = {"id": task_id, "contextId": context_id, "status": status}
+    task: Dict[str, Any] = {
+        "id": task_id,
+        "contextId": context_id,
+        "status": status,
+        "kind": "task",
+    }
     if artifacts is not None:
         task["artifacts"] = artifacts
     if history is not None:
@@ -107,7 +118,7 @@ class PrescriptionCompleterAgent:
         context_id = message.get("contextId") or str(uuid.uuid4())
         history = [message] if include_history else None
 
-        task = _task_object(task_id, context_id, "submitted", history=history)
+        task = _task_object(task_id, context_id, STATE_SUBMITTED, history=history)
 
         with self._lock:
             self._tasks[task_id] = {"task": task, "history": history, "artifacts": []}
@@ -130,7 +141,7 @@ class PrescriptionCompleterAgent:
         task_id = str(uuid.uuid4())
         context_id = message.get("contextId") or str(uuid.uuid4())
 
-        task = _task_object(task_id, context_id, "submitted")
+        task = _task_object(task_id, context_id, STATE_SUBMITTED)
         with self._lock:
             self._tasks[task_id] = {"task": task, "history": [message], "artifacts": []}
 
@@ -139,7 +150,7 @@ class PrescriptionCompleterAgent:
         status_update = {
             "taskId": task_id,
             "contextId": context_id,
-            "status": {"state": "working", "timestamp": _utc_now()},
+            "status": {"state": STATE_WORKING, "timestamp": _utc_now()},
         }
         yield {"statusUpdate": status_update}
 
@@ -155,7 +166,11 @@ class PrescriptionCompleterAgent:
             failed_update = {
                 "taskId": task_id,
                 "contextId": context_id,
-                "status": {"state": "failed", "timestamp": _utc_now(), "message": error_message},
+                "status": {
+                    "state": STATE_FAILED,
+                    "timestamp": _utc_now(),
+                    "message": error_message,
+                },
             }
             yield {"statusUpdate": failed_update}
             return
@@ -174,7 +189,7 @@ class PrescriptionCompleterAgent:
         completed_update = {
             "taskId": task_id,
             "contextId": context_id,
-            "status": {"state": "completed", "timestamp": _utc_now()},
+            "status": {"state": STATE_COMPLETED, "timestamp": _utc_now()},
         }
         yield {"statusUpdate": completed_update}
 
@@ -194,11 +209,11 @@ class PrescriptionCompleterAgent:
         with self._lock:
             record = self._tasks[task_id]
         task = record["task"]
-        task["status"] = {"state": "working", "timestamp": _utc_now()}
+        task["status"] = {"state": STATE_WORKING, "timestamp": _utc_now()}
 
         try:
             report, artifacts = self._process_request(task_id, request)
-            task["status"] = {"state": "completed", "timestamp": _utc_now()}
+            task["status"] = {"state": STATE_COMPLETED, "timestamp": _utc_now()}
             task["artifacts"] = artifacts
         except Exception as exc:
             error_message = _new_message(
@@ -208,7 +223,7 @@ class PrescriptionCompleterAgent:
                 task_id=task_id,
             )
             task["status"] = {
-                "state": "failed",
+                "state": STATE_FAILED,
                 "timestamp": _utc_now(),
                 "message": error_message,
             }

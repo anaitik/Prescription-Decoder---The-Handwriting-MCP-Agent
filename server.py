@@ -33,7 +33,8 @@ PROMPT = (
     "Extract all medications, dosages, and instructions from this doctor's prescription. "
     "Format the output as a JSON array with fields: medication_name, dosage, frequency, "
     "duration, and instructions. If something is unclear, make your best guess and note "
-    "it with a 'confidence: low' field."
+    "it with a 'confidence: low' field. "
+    "Return ONLY a valid JSON array. Do not include any extra text or markdown."
 )
 TRANSLATION_PROMPT = (
     "Translate the following medical text into {language}. "
@@ -656,6 +657,42 @@ def _call_openai_with_retries(client, *, max_retries: int, backoff_seconds: floa
             attempt += 1
 
 
+def _extract_json_array(text: str) -> List[Dict[str, Any]]:
+    if not text:
+        raise RuntimeError("Vision API returned empty text.")
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # Try fenced code block first.
+    fence_match = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", text, re.IGNORECASE)
+    if fence_match:
+        snippet = fence_match.group(1)
+        try:
+            parsed = json.loads(snippet)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: first '[' to last ']'
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        snippet = text[start : end + 1]
+        try:
+            parsed = json.loads(snippet)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    raise RuntimeError("Vision API response was not valid JSON.")
+
+
 @mcp.tool()
 def decode_prescription(
     image_data: str,
@@ -741,13 +778,7 @@ def decode_prescription(
     if not output_text:
         raise RuntimeError("Vision API returned no text output.")
 
-    try:
-        parsed = json.loads(output_text)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Vision API response was not valid JSON.") from exc
-
-    if not isinstance(parsed, list):
-        raise RuntimeError("Vision API response JSON must be an array.")
+    parsed = _extract_json_array(output_text)
 
     resources = []
     for item in parsed:
